@@ -519,13 +519,13 @@ if ss.get("pending_unknown_bc") is not None:
             }
         ss["pending_unknown_bc"] = None
         st.success(f"Barcode {bad_bc} added to Box {target_box}. You may continue scanning.")
-        st.experimental_rerun()  # refresh UI to clear the popup
+        st.stop()  # safe halt, works on Streamlit Cloud
 
     # Remove button
     if colB.button("❌ Remove barcode (ignore)"):
         ss["pending_unknown_bc"] = None
         st.warning(f"Barcode {bad_bc} ignored. You may continue scanning.")
-        st.experimental_rerun()
+        st.stop()  # safe halt, works on Streamlit Cloud
 
     # Ensure page execution stops while pending
     st.stop()
@@ -551,9 +551,9 @@ else:
                     if ok:
                         st.success(f"Scanned {barcode} (Random)")
                     else:
-                        # blocked — pending_unknown_bc set; UI will show popup on next render
+                        # blocked — pending_unknown_bc set; UI will show popup on this same render
                         st.error(f"Unknown barcode {barcode} — action required.")
-                        st.experimental_rerun()
+                        st.stop()  # safe halt; popup will be shown on next render
                 else:
                     if not ss["current_box"]:
                         st.warning("Select or create a box first (sidebar).")
@@ -563,7 +563,7 @@ else:
                             st.success(f"Scanned {barcode} in Box {ss['current_box']}")
                         else:
                             st.error(f"Unknown barcode {barcode} — action required.")
-                            st.experimental_rerun()
+                            st.stop()  # safe halt; popup will be shown on next render
 
 # Live summary
 st.subheader("🔎 Live Scans")
