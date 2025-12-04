@@ -1,13 +1,14 @@
 # app.py
 # Streamlit Inventory Scanner (Random / Per-Box)
-# Modified: editable quantities, delete rows, 13-digit barcode validation,
-# added "System Template" export, and Database mode (Oracle) to load transfers.
+# Modified: blocking popup for unknown barcodes + built-in beep (Web Audio API)
+# - When unknown barcode scanned: scanning is blocked, beep plays, user must Add or Remove.
 
 import io
 from datetime import datetime
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 # Optional DB client — required only when using Database mode
 try:
@@ -35,6 +36,8 @@ def init_state():
     ss.setdefault("admitted_boxes", set())           # boxes you admitted
     # DB caching
     ss.setdefault("transfers_df", None)              # raw transfers fetched from DB (if any)
+    # Pending unknown barcode (blocks scanning until handled)
+    ss.setdefault("pending_unknown_bc", None)        # (target_box, barcode) or None
 
 def load_database(file):
     df = pd.read_excel(file)
@@ -72,37 +75,33 @@ def is_valid_barcode_13(bc):
     return isinstance(bc, str) and bc.isdigit() and len(bc) == 13
 
 def record_scan(ss, target_box, barcode):
-    """Record a scan. Assumes barcode already validated (13 digits)."""
+    """Record a scan. Assumes barcode already validated (13 digits).
+       If barcode unknown, set pending_unknown_bc and return False to indicate blocking.
+       Otherwise record normally and return True.
+    """
+    # If barcode not in DB, block and set pending
+    if barcode not in ss["db_by_barcode"]:
+        ss["pending_unknown_bc"] = (target_box, barcode)
+        return False
+
     scans = ss["scans"]
     ensure_box(ss, target_box)
     box_scans = scans[target_box]
 
     if barcode not in box_scans:
-        if barcode in ss["db_by_barcode"]:
-            info = ss["db_by_barcode"][barcode].copy()
-            info["scanned_qty"] = 0
-            info["anomalies"] = []
+        info = ss["db_by_barcode"][barcode].copy()
+        info["scanned_qty"] = 0
+        info["anomalies"] = []
 
-            # wrong box anomaly (per_box mode)
-            if ss["mode"] == "per_box" and info.get("box_no") != target_box:
-                info["anomalies"].append(
-                    f"Wrong box: belongs to {info.get('box_no')} but scanned in {target_box}"
-                )
-        else:
-            # unknown barcode
-            info = {
-                "box_no": target_box,
-                "barcode": barcode,
-                "item_code": "UNKNOWN",
-                "size": "N/A",
-                "color": "N/A",
-                "avl_qty": 0,
-                "scanned_qty": 0,
-                "anomalies": ["Unknown barcode"],
-            }
+        # wrong box anomaly (per_box mode)
+        if ss["mode"] == "per_box" and info.get("box_no") != target_box:
+            info["anomalies"].append(
+                f"Wrong box: belongs to {info.get('box_no')} but scanned in {target_box}"
+            )
         box_scans[barcode] = info
 
     box_scans[barcode]["scanned_qty"] += 1
+    return True
 
 def compute_box_anomalies(ss, box_no):
     """Return a list of human-readable anomalies for a given box."""
@@ -196,7 +195,7 @@ def export_system_template_bytes(ss):
 def get_connection():
     try:
         # Force thick mode
-        oracledb.init_oracle_client(lib_dir=r"C:/WINDOWS.X64_193000_db_home")
+        oracledb.init_oracle_client(lib_dir=r"C:/client_1")
 
         db_user = "lotfi"
         db_password = "YS123"  # ⚠️ Use the exact same password as your working script
@@ -447,6 +446,7 @@ with st.sidebar:
         ss["manual_boxes"].clear()
         ss["admitted_boxes"].clear()
         ss["current_box"] = None
+        ss["pending_unknown_bc"] = None
         st.toast("All scans reset.", icon="🧹")
 
 # ---------------- Main Area ----------------
@@ -467,6 +467,69 @@ c4.markdown(f"**Scanned Lines:** <span class='blk'>{total_lines}</span>", unsafe
 
 st.divider()
 
+# If we have a pending unknown barcode, show blocking popup + play beep
+if ss.get("pending_unknown_bc") is not None:
+    target_box, bad_bc = ss["pending_unknown_bc"]
+
+    # Play a short built-in beep using WebAudio via an embedded HTML/JS snippet.
+    # This code will run immediately when this block is rendered (once).
+    beep_js = f"""
+    <script>
+    // Play a short beep using Web Audio API
+    (function() {{
+        try {{
+            const ctx = new (window.AudioContext || window.webkitAudioContext)();
+            const o = ctx.createOscillator();
+            const g = ctx.createGain();
+            o.type = 'sine';
+            o.frequency.value = 880; // frequency in Hz (A5-ish)
+            g.gain.value = 0.05; // volume (small)
+            o.connect(g);
+            g.connect(ctx.destination);
+            o.start(0);
+            // stop after 220 ms
+            setTimeout(function(){{ o.stop(); ctx.close(); }}, 220);
+        }} catch (e) {{
+            console.log('Beep failed', e);
+        }}
+    }})();
+    </script>
+    """
+    components.html(beep_js, height=0)
+
+    st.error(f"🚫 Barcode {bad_bc} does NOT exist in the database! Please choose an action to continue scanning.")
+    colA, colB = st.columns(2)
+    # Add button
+    if colA.button("➕ Add barcode (manually)"):
+        ensure_box(ss, target_box)
+        # If barcode exists already in scans, increment; otherwise create new manual entry
+        if bad_bc in ss["scans"].get(target_box, {}):
+            ss["scans"][target_box][bad_bc]["scanned_qty"] += 1
+            ss["scans"][target_box][bad_bc]["anomalies"].append("Unknown barcode (manually added, duplicate scan)")
+        else:
+            ss["scans"][target_box][bad_bc] = {
+                "box_no": target_box,
+                "barcode": bad_bc,
+                "item_code": "UNKNOWN",
+                "size": "N/A",
+                "color": "N/A",
+                "avl_qty": 0,
+                "scanned_qty": 1,
+                "anomalies": ["Unknown barcode (manually added)"],
+            }
+        ss["pending_unknown_bc"] = None
+        st.success(f"Barcode {bad_bc} added to Box {target_box}. You may continue scanning.")
+        st.experimental_rerun()  # refresh UI to clear the popup
+
+    # Remove button
+    if colB.button("❌ Remove barcode (ignore)"):
+        ss["pending_unknown_bc"] = None
+        st.warning(f"Barcode {bad_bc} ignored. You may continue scanning.")
+        st.experimental_rerun()
+
+    # Ensure page execution stops while pending
+    st.stop()
+
 # Scan form
 if ss["mode"] is None:
     st.warning("Choose a scan mode in the sidebar.")
@@ -484,14 +547,23 @@ else:
                 st.error(f"Invalid barcode format: {barcode}. Barcode must be exactly 13 numeric digits.")
             else:
                 if ss["mode"] == "random":
-                    record_scan(ss, "RANDOM", barcode)
-                    st.success(f"Scanned {barcode} (Random)")
+                    ok = record_scan(ss, "RANDOM", barcode)
+                    if ok:
+                        st.success(f"Scanned {barcode} (Random)")
+                    else:
+                        # blocked — pending_unknown_bc set; UI will show popup on next render
+                        st.error(f"Unknown barcode {barcode} — action required.")
+                        st.experimental_rerun()
                 else:
                     if not ss["current_box"]:
                         st.warning("Select or create a box first (sidebar).")
                     else:
-                        record_scan(ss, ss["current_box"], barcode)
-                        st.success(f"Scanned {barcode} in Box {ss['current_box']}")
+                        ok = record_scan(ss, ss["current_box"], barcode)
+                        if ok:
+                            st.success(f"Scanned {barcode} in Box {ss['current_box']}")
+                        else:
+                            st.error(f"Unknown barcode {barcode} — action required.")
+                            st.experimental_rerun()
 
 # Live summary
 st.subheader("🔎 Live Scans")
