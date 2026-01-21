@@ -530,41 +530,6 @@ if ss.get("pending_unknown_bc") is not None:
     # Ensure page execution stops while pending
     st.stop()
 
-# Scan form
-if ss["mode"] is None:
-    st.warning("Choose a scan mode in the sidebar.")
-else:
-    # Use single input for scanning, validate 13-digit barcodes
-    scan_key = "scan_input_random" if ss["mode"] == "random" else "scan_input_box"
-    with st.form("scan_form", clear_on_submit=True):
-        st.text_input("Scan barcode", key=scan_key, placeholder="Focus here and scan…")
-        submitted = st.form_submit_button("Add Scan")
-        if submitted:
-            barcode = safe_str(st.session_state.get(scan_key, ""))
-            if not barcode:
-                st.warning("Please scan a barcode.")
-            elif not is_valid_barcode_13(barcode):
-                st.error(f"Invalid barcode format: {barcode}. Barcode must be exactly 13 numeric digits.")
-            else:
-                if ss["mode"] == "random":
-                    ok = record_scan(ss, "RANDOM", barcode)
-                    if ok:
-                        st.success(f"Scanned {barcode} (Random)")
-                    else:
-                        # blocked — pending_unknown_bc set; UI will show popup on this same render
-                        st.error(f"Unknown barcode {barcode} — action required.")
-                        st.stop()  # safe halt; popup will be shown on next render
-                else:
-                    if not ss["current_box"]:
-                        st.warning("Select or create a box first (sidebar).")
-                    else:
-                        ok = record_scan(ss, ss["current_box"], barcode)
-                        if ok:
-                            st.success(f"Scanned {barcode} in Box {ss['current_box']}")
-                        else:
-                            st.error(f"Unknown barcode {barcode} — action required.")
-                            st.stop()  # safe halt; popup will be shown on next render
-
 # Live summary
 st.subheader("🔎 Live Scans")
 tabs = st.tabs(["By Box", "All Items", "Database Preview"])
@@ -575,7 +540,7 @@ with tabs[0]:
     else:
         for box_no, items in list(ss["scans"].items()):
             manual = "Yes" if box_no in ss["manual_boxes"] else "No"
-            sub = st.expander(f"Box {box_no}  •  Manual: {manual}  •  Items: {len(items)}", expanded=(ss["current_box"] == box_no))
+            sub = st.expander(f"Box {box_no}  •  Manual: {manual}  •  Items: {len(items)}", expanded=True)
 
             # Build dataframe for editing
             df_box = []
@@ -637,6 +602,17 @@ with tabs[0]:
                         ss["scans"][box_no].pop(bc, None)
                     st.success(f"Deleted {len(to_delete)} row(s) from Box {box_no}.")
 
+            # Delete entire box button
+            if st.button("Delete Entire Box", key=f"delete_box_{box_no}", type="secondary"):
+                if box_no in ss["scans"]:
+                    del ss["scans"][box_no]
+                if box_no in ss["manual_boxes"]:
+                    ss["manual_boxes"].remove(box_no)
+                if ss["current_box"] == box_no:
+                    ss["current_box"] = None
+                st.success(f"Box {box_no} deleted.")
+                st.stop()  # Refresh to update UI
+
 with tabs[1]:
     # Flatten all scans into one table
     rows = []
@@ -665,3 +641,50 @@ with tabs[2]:
         st.dataframe(ss["db_df"], use_container_width=True)
     else:
         st.info("No database loaded yet (Excel or DB transfer).")
+
+# Scan input
+if ss["mode"] is None:
+    st.warning("Choose a scan mode in the sidebar.")
+else:
+    # Use single input for scanning, auto-submit when 13 digits
+    scan_key = "scan_input_random" if ss["mode"] == "random" else "scan_input_box"
+
+    def process_scan():
+        barcode = safe_str(st.session_state.get(scan_key, ""))
+        if len(barcode) == 13 and barcode.isdigit():
+            if ss["mode"] == "random":
+                ok = record_scan(ss, "RANDOM", barcode)
+                if ok:
+                    st.success(f"Scanned {barcode} (Random)")
+                else:
+                    st.error(f"Unknown barcode {barcode} — action required.")
+            else:
+                if not ss["current_box"]:
+                    st.warning("Select or create a box first (sidebar).")
+                else:
+                    ok = record_scan(ss, ss["current_box"], barcode)
+                    if ok:
+                        st.success(f"Scanned {barcode} in Box {ss['current_box']}")
+                    else:
+                        st.error(f"Unknown barcode {barcode} — action required.")
+            # Clear input after processing
+            st.session_state[scan_key] = ""
+            # Refocus the input field after processing
+            focus_js = f"""
+            <script>
+            setTimeout(function() {{
+                const inputs = document.querySelectorAll('input[data-testid="stTextInput"]');
+                for (let input of inputs) {{
+                    if (input.placeholder === "Focus here and scan…") {{
+                        input.focus();
+                        break;
+                    }}
+                }}
+            }}, 100);
+            </script>
+            """
+            components.html(focus_js, height=0)
+        elif barcode and not (len(barcode) == 13 and barcode.isdigit()):
+            st.warning("Invalid barcode format. Must be exactly 13 numeric digits.")
+
+    st.text_input("Scan barcode", key=scan_key, placeholder="Focus here and scan…", on_change=process_scan)
