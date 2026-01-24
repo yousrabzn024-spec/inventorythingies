@@ -3,4 +3,5 @@ altair==4.2.2
 pandas
 openpyxl
 oracledb
---python-version 3.12
+
+
